@@ -1,3 +1,3 @@
-"""Gemini Code: a coding agent for the terminal, powered by the Gemini API."""
+"""Gemini Code: Gemini in the terminal, via the gemini.google.com web app or the Gemini API."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

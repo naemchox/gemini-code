@@ -12,6 +12,7 @@ from rich.console import Console
 
 from . import __version__
 from .agent import Agent
+from .prompt import enable_line_editing, read_prompt
 from .usage import time_until_reset
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -26,19 +27,6 @@ HELP = """[bold]คำสั่ง[/bold]
   /exit            ออก (หรือกด Ctrl+D)
 
 พิมพ์ \\ ท้ายบรรทัดเพื่อขึ้นบรรทัดใหม่  กด Ctrl+C เพื่อยกเลิกงานที่กำลังทำ"""
-
-
-def read_prompt() -> str:
-    lines = []
-    prompt = "\001\033[1;32m\002> \001\033[0m\002"
-    while True:
-        line = input(prompt)
-        if line.endswith("\\"):
-            lines.append(line[:-1])
-            prompt = "\001\033[2m\002. \001\033[0m\002"
-            continue
-        lines.append(line)
-        return "\n".join(lines).strip()
 
 
 def show_usage(agent: Agent, console: Console) -> None:
@@ -118,14 +106,24 @@ def handle_command(command: str, agent: Agent, console: Console) -> bool:
 
 def main() -> None:
     load_dotenv(APP_DIR / ".env")
-    parser = argparse.ArgumentParser(prog="gcode", description="Gemini coding agent in your terminal")
+    parser = argparse.ArgumentParser(prog="gcode", description="Gemini in your terminal")
     parser.add_argument("prompt", nargs="*", help="ถ้าใส่ข้อความ จะทำงานนั้นครั้งเดียวแล้วออก")
-    parser.add_argument("-m", "--model", default=os.getenv("GEMINI_MODEL", DEFAULT_MODEL))
-    parser.add_argument("--yolo", action="store_true", help="อนุมัติทุกการแก้ไฟล์และรันคำสั่งอัตโนมัติ (ระวัง)")
+    parser.add_argument("--api", action="store_true", help="ใช้โหมด API (agent แก้ไฟล์ได้) แทนโหมดเว็บ")
+    parser.add_argument("-m", "--model", default=os.getenv("GEMINI_MODEL", DEFAULT_MODEL), help="โมเดล (โหมด API)")
+    parser.add_argument("--yolo", action="store_true", help="โหมด API: อนุมัติทุกการแก้ไฟล์และรันคำสั่งอัตโนมัติ (ระวัง)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args()
 
     console = Console()
+    if not args.api:
+        from .web import run_web
+
+        try:
+            run_web(" ".join(args.prompt), console)
+        except KeyboardInterrupt:
+            pass
+        return
+
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
         console.print(
@@ -140,12 +138,8 @@ def main() -> None:
         agent.run_turn(" ".join(args.prompt))
         return
 
-    try:
-        import readline  # noqa: F401  (arrow keys and input history)
-    except ImportError:
-        pass
-
-    console.print(f"[bold cyan]Gemini Code[/bold cyan] v{__version__} · {agent.model} · {Path.cwd()}")
+    enable_line_editing()
+    console.print(f"[bold cyan]Gemini Code[/bold cyan] v{__version__} · โหมด API · {agent.model} · {Path.cwd()}")
     if args.yolo:
         console.print("[bold red]โหมด --yolo: อนุมัติทุกอย่างอัตโนมัติ[/bold red]")
     console.print("[dim]พิมพ์ /help เพื่อดูคำสั่ง[/dim]\n")
