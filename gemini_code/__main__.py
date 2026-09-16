@@ -1,6 +1,7 @@
 """Command-line entry point: `python -m gemini_code` or the `gcode` launcher."""
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -10,13 +11,14 @@ from google import genai
 from google.genai import errors
 from rich.console import Console
 
-from . import __version__
+from . import __version__, sessions
 from .agent import Agent
 from .prompt import enable_line_editing, read_prompt
 from .usage import time_until_reset
 
 APP_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = "gemini-3-flash-preview"
+CLOSE_TERMINAL_EXIT_CODE = 99  # keep in sync with the gcode() shell function printed by setup.sh
 
 HELP = """[bold]คำสั่ง[/bold]
   /help            แสดงวิธีใช้
@@ -110,18 +112,50 @@ def main() -> None:
     parser.add_argument("prompt", nargs="*", help="ถ้าใส่ข้อความ จะทำงานนั้นครั้งเดียวแล้วออก")
     parser.add_argument("--api", action="store_true", help="ใช้โหมด API (agent แก้ไฟล์ได้) แทนโหมดเว็บ")
     parser.add_argument("-m", "--model", default=os.getenv("GEMINI_MODEL", DEFAULT_MODEL), help="โมเดล (โหมด API)")
-    parser.add_argument("--yolo", action="store_true", help="โหมด API: อนุมัติทุกการแก้ไฟล์และรันคำสั่งอัตโนมัติ (ระวัง)")
+    parser.add_argument("--yolo", action="store_true", help="อนุมัติทุกการแก้ไฟล์ ลบไฟล์ และรันคำสั่งอัตโนมัติ (ระวัง)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    # Scripted use (the /gcode and /gcodeclose commands in Claude Code): remember the chats a
+    # one-shot run creates under a caller-chosen key, so a later run can continue or delete them.
+    parser.add_argument("--session", help="คีย์สำหรับจดจำแชทที่สร้าง (เช่น id ของ session ที่เรียก)")
+    parser.add_argument("-c", "--continue", dest="continue_chat", action="store_true",
+                        help="คุยต่อในแชทล่าสุดของ --session แทนที่จะเปิดแชทใหม่")
+    parser.add_argument("--resume", metavar="CHAT_ID", help="คุยต่อในแชทที่ระบุ")
+    parser.add_argument("--list-chats", action="store_true", help="แสดงแชทของ --session เป็น JSON แล้วออก")
+    parser.add_argument("--delete", metavar="CHAT_ID", nargs="+", help="ลบแชทตามรหัสที่ระบุแล้วออก")
     args = parser.parse_args()
 
     console = Console()
+
+    if args.list_chats:
+        if not args.session:
+            console.print("[red]--list-chats ต้องใช้คู่กับ --session[/red]")
+            sys.exit(1)
+        print(json.dumps(sessions.load(args.session), ensure_ascii=False))
+        return
+
+    if args.delete:
+        from .web import run_delete
+
+        deleted = run_delete(args.delete, console, session=args.session)
+        missing = [c for c in args.delete if c not in deleted]
+        if missing:
+            console.print(f"[yellow]ยังลบไม่สำเร็จ: {', '.join(missing)}[/yellow]")
+            sys.exit(1)
+        return
     if not args.api:
         from .web import run_web
 
+        resume = args.resume or (sessions.latest(args.session) if args.continue_chat and args.session else None)
         try:
-            run_web(" ".join(args.prompt), console)
+            close_terminal = run_web(
+                " ".join(args.prompt), console, yolo=args.yolo, session=args.session, resume=resume
+            )
         except KeyboardInterrupt:
-            pass
+            return
+        if close_terminal:
+            if os.getenv("GCODE_SHELL_FUNCTION"):
+                sys.exit(CLOSE_TERMINAL_EXIT_CODE)  # the gcode() function in ~/.zshrc sees this and exits the shell
+            console.print("ปิดหน้าต่าง terminal นี้ได้เลย [dim](เรียกผ่านฟังก์ชัน gcode ใน ~/.zshrc จะปิดให้อัตโนมัติ)[/dim]")
         return
 
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")

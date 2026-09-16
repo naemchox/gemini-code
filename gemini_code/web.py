@@ -18,7 +18,17 @@ from playwright.sync_api import Browser, BrowserContext, Locator, Page, sync_pla
 from rich.console import Console
 from rich.markdown import Markdown
 
+from .actions import (
+    RESPONSE_BLOCKS_JS,
+    Action,
+    build_first_message,
+    build_follow_up_message,
+    format_results,
+    parse_response,
+)
 from .prompt import enable_line_editing, read_prompt
+from .runner import ToolRunner
+from . import sessions
 
 GEMINI_URL = "https://gemini.google.com/app?hl=th"
 CDP_PORT = 9333
@@ -35,11 +45,32 @@ SIGN_IN = 'a:has-text("ลงชื่อเข้าใช้"), button:has-tex
 RESPONSE = "model-response"
 GENERATED_IMAGE = "generated-image"
 IMAGE_DOWNLOAD_BUTTON = "download-generated-image-button button"
+CHAT_ACTIONS_BUTTON = (
+    'button[aria-label="เปิดเมนูสําหรับการดําเนินการที่เกี่ยวกับการสนทนา"], '
+    'button[aria-label="Open menu for conversation actions"]'
+)
+DELETE_MENU_ITEM = '[data-test-id="delete-button"]'
+DIALOG = "mat-dialog-container, [role=dialog]"
+DIALOG_CONFIRM_DELETE = re.compile(r"^\s*(ลบ|Delete)\s*$")
+CHAT_NOT_FOUND_TEXT = re.compile(r"ถูกลบไปแล้ว|doesn't exist|deleted")
+CHAT_ID_IN_URL = re.compile(r"/app/([0-9a-f]+)")
+GEMINI_ERROR_REPLY = re.compile(r"encountering an error|Something went wrong|เกิดข้อผิดพลาดบางอย่าง")
 MODE_NAME = re.compile(r"^\d+(\.\d+)?\s+(Flash-Lite|Flash|Pro|Ultra)\b")
 
-RESPONSE_START_TIMEOUT = 60
+RESPONSE_START_TIMEOUT = 120
 RESPONSE_TIMEOUT = 900
 STABLE_SECONDS = 1.5
+MAX_ACTION_STEPS = 25
+DELETE_CONFIRM_SECONDS = 8
+DELETE_PAUSE_SECONDS = 3
+BETWEEN_DELETES_SECONDS = 8  # a person doesn't delete chats back to back; see CLAUDE.md
+RESUME_SETTLE_SECONDS = 2
+RESULTS_PAUSE_SECONDS = 2
+BLOCKED_URL = "google.com/sorry"
+
+
+class BlockedByGoogle(RuntimeError):
+    """Google showed its automated-traffic check (CAPTCHA). The user has to solve it themselves."""
 IMAGE_DOWNLOAD_TIMEOUT_MS = 60_000
 
 # Snapshot of the newest response: still streaming? finished? how much text? images still loading?
@@ -87,10 +118,12 @@ HELP = """[bold]คำสั่ง (โหมดเว็บ)[/bold]
   /new             เริ่มแชทใหม่
   /mode [ชื่อ]      ดูหรือเปลี่ยนโมเดล เช่น /mode 3.1 Pro
   /open            สลับไปดูแท็บนี้ใน Chrome
-  /exit            ออก (หรือกด Ctrl+D)
+  /close           ลบแชทของ terminal นี้ออกจาก Gemini แล้วปิด terminal
+  /exit            ออก โดยเก็บแชทไว้ (หรือกด Ctrl+D)
 
 พิมพ์ \\ ท้ายบรรทัดเพื่อขึ้นบรรทัดใหม่  กด Ctrl+C ระหว่างรอเพื่อหยุดคำตอบ
-รูปที่ Gemini สร้างจะถูกเซฟในโฟลเดอร์ที่เรียก gcode"""
+Gemini อ่าน/เขียน/แก้/ลบไฟล์ และรันคำสั่งในโฟลเดอร์ที่เรียก gcode ได้ (ถามก่อนทุกครั้งที่เปลี่ยนแปลง)
+รูปที่ Gemini สร้างจะถูกเซฟในโฟลเดอร์เดียวกัน"""
 
 
 def _code_language(pre) -> str | None:
@@ -170,13 +203,27 @@ def open_background_tab(browser: Browser, context: BrowserContext, keep_hidden: 
 
 
 class GeminiWeb:
-    def __init__(self, page: Page, console: Console, save_dir: Path):
+    def __init__(self, page: Page, console: Console, save_dir: Path, yolo: bool = False):
         self.page = page
         self.console = console
         self.save_dir = save_dir
+        self.runner = ToolRunner(console, yolo=yolo)
+        self.chat_ids: list[str] = []  # every Gemini chat this terminal session created
+        self.needs_protocol = True  # the first message of each chat teaches Gemini the @@ actions
+
+    def check_not_blocked(self) -> None:
+        """Stop if Google flagged automated traffic. Never try to get past the check automatically."""
+        if BLOCKED_URL in self.page.url:
+            show_chrome(self.page)
+            raise BlockedByGoogle(
+                "Google ตรวจพบการใช้งานอัตโนมัติและขอให้ยืนยันตัวตน "
+                "ยืนยันเองในหน้าต่าง Chrome ที่เปิดขึ้นมา แล้วพักการใช้งานสักครู่ก่อนเรียก gcode ใหม่"
+            )
 
     def open_new_chat(self) -> None:
+        self.needs_protocol = True
         self.page.goto(GEMINI_URL)
+        self.check_not_blocked()
         self.page.locator(EDITOR).first.wait_for(timeout=30_000)
         while self.page.locator(SIGN_IN).count():
             show_chrome(self.page)
@@ -186,9 +233,64 @@ class GeminiWeb:
             self.page.goto(GEMINI_URL)
             self.page.locator(EDITOR).first.wait_for(timeout=30_000)
 
+    def open_chat(self, chat_id: str) -> bool:
+        """Continue an existing chat. Return False (and open a new chat instead) if it is gone.
+
+        A deleted chat redirects to a fresh chat, so trust the URL only after it has settled.
+        """
+        self.page.goto(f"https://gemini.google.com/app/{chat_id}?hl=th")
+        self.check_not_blocked()
+        self.page.locator(EDITOR).first.wait_for(timeout=30_000)
+        time.sleep(RESUME_SETTLE_SECONDS)
+        if self.page.locator(SIGN_IN).count() or chat_id not in self.page.url:
+            self.open_new_chat()
+            return False
+        self.needs_protocol = False  # this chat already learned the @@ protocol
+        if chat_id not in self.chat_ids:
+            self.chat_ids.append(chat_id)
+        return True
+
     # --- chatting ---------------------------------------------------------------
 
     def ask(self, text: str) -> None:
+        """Send a request, then keep running Gemini's @@ actions and sending results until it is done."""
+        message = build_first_message(text) if self.needs_protocol else build_follow_up_message(text)
+        for _ in range(MAX_ACTION_STEPS):
+            response, interrupted = self._send(message)
+            self.needs_protocol = False
+            if response is not None and not interrupted and GEMINI_ERROR_REPLY.search(response.inner_text()[:300]):
+                self.console.print("[yellow]Gemini ตอบว่าเกิดข้อผิดพลาด กำลังส่งใหม่อีกครั้ง...[/yellow]")
+                time.sleep(3)
+                response, interrupted = self._send(message)
+            if response is None:
+                return
+            actions, display = parse_response(response.evaluate(RESPONSE_BLOCKS_JS))
+            if actions:
+                self._print_blocks(display)
+            else:
+                self._print_markdown(response)
+            self._save_images(response)
+            if interrupted or not actions:
+                return
+            try:
+                results = [(action, self._run_action(action)) for action in actions]
+            except KeyboardInterrupt:
+                self.console.print("\n[yellow]ยกเลิกแล้ว ยังไม่ได้ส่งผลลัพธ์ให้ Gemini[/yellow]")
+                return
+            message = format_results(results)
+            time.sleep(RESULTS_PAUSE_SECONDS)  # pace follow-up messages like a person would
+        self.console.print(f"[yellow]หยุดหลังจากทำงานครบ {MAX_ACTION_STEPS} รอบ พิมพ์ต่อเพื่อให้ทำต่อ[/yellow]")
+
+    def _run_action(self, action: Action) -> dict:
+        try:
+            name, args = action.to_tool_call()
+        except ValueError as e:
+            self.console.print(f"[red]● @@{action.label}: {e}[/red]", highlight=False)
+            return {"error": str(e)}
+        return self.runner.run(name, args)
+
+    def _send(self, text: str) -> tuple[Locator | None, bool]:
+        """Send one message and wait for the reply. Return (response, interrupted by Ctrl+C)."""
         responses = self.page.locator(RESPONSE)
         before = responses.count()
         editor = self.page.locator(EDITOR).first
@@ -198,28 +300,59 @@ class GeminiWeb:
         self.page.keyboard.insert_text(text)
         self.page.locator(SEND_BUTTON).first.click(timeout=10_000)
 
+        interrupted = False
         try:
             self._wait_for_response(before)
         except KeyboardInterrupt:
+            interrupted = True
             stop = self.page.locator(STOP_BUTTON)
             if stop.count():
                 stop.first.click()
             self.console.print("[yellow]หยุดคำตอบแล้ว[/yellow]")
+        finally:
+            self._remember_chat()
         if responses.count() <= before:
-            return
-        response = responses.last
+            return None, interrupted
+        return responses.last, interrupted
+
+    def _remember_chat(self) -> None:
+        """Record the chat id once Gemini assigns one (the URL changes to /app/<id>), so /close can delete it."""
+        match = CHAT_ID_IN_URL.search(self.page.url)
+        if match and match.group(1) not in self.chat_ids:
+            self.chat_ids.append(match.group(1))
+
+    def _print_markdown(self, response: Locator) -> None:
         markdown = html_to_markdown(response.evaluate(RESPONSE_HTML_JS))
         if markdown:
             self.console.print(Markdown(markdown))
-        self._save_images(response)
+
+    def _print_blocks(self, blocks: list[dict]) -> None:
+        """Print a response whose action lines and file contents were removed (shown as tool calls instead)."""
+        parts = []
+        for block in blocks:
+            if block["type"] == "code":
+                parts.append(f"```{block['lang']}\n{block['code'].rstrip()}\n```")
+            elif block["html"]:
+                parts.append(html_to_markdown(block["html"]))
+            else:
+                parts.append(block["text"])
+        markdown = "\n\n".join(p for p in parts if p.strip())
+        if markdown:
+            self.console.print(Markdown(markdown))
 
     def _wait_for_response(self, before: int) -> None:
         start = time.monotonic()
         with self.console.status("[cyan]ส่งแล้ว รอ Gemini...[/cyan]") as status:
             while self.page.locator(RESPONSE).count() <= before:
-                if time.monotonic() - start > RESPONSE_START_TIMEOUT:
+                self._remember_chat()
+                # Long prompts can think for minutes before the reply appears; the stop button means "still working".
+                working = self.page.locator(STOP_BUTTON).count() > 0
+                if not working and time.monotonic() - start > RESPONSE_START_TIMEOUT:
                     raise TimeoutError("Gemini ไม่ตอบกลับ ลองดูในหน้าต่าง Chrome ด้วย /open")
-                time.sleep(0.3)
+                if time.monotonic() - start > RESPONSE_TIMEOUT:
+                    raise TimeoutError("รอคำตอบนานเกินไป")
+                status.update(f"[cyan]Gemini กำลังคิด... {int(time.monotonic() - start)} วินาที[/cyan]")
+                time.sleep(0.5)
             last_length, stable_since = -1, time.monotonic()
             while True:
                 state = self.page.evaluate(RESPONSE_STATE_JS)
@@ -285,6 +418,56 @@ class GeminiWeb:
         path.write_bytes(base64.b64decode(data_url.split(",", 1)[1]))
         return path
 
+    # --- deleting chats -----------------------------------------------------------
+
+    def delete_session_chats(self) -> bool:
+        """Delete every chat this session created. Return True only if all of them are gone.
+
+        Only ids recorded while sending messages are deleted, never whatever chat the tab happens to show.
+        """
+        if not self.chat_ids:
+            self.console.print("[dim]terminal นี้ยังไม่ได้เริ่มแชทใน Gemini ไม่มีแชทต้องลบ[/dim]")
+            return True
+        total = len(self.chat_ids)
+        with self.console.status("[cyan]กำลังลบแชทใน Gemini...[/cyan]"):
+            for chat_id in list(self.chat_ids):
+                try:
+                    self._delete_chat(chat_id)
+                except PlaywrightError as e:
+                    self.console.print(f"[red]ลบแชท {chat_id} ไม่สำเร็จ: {str(e).splitlines()[0]}[/red]")
+                    return False
+                self.chat_ids.remove(chat_id)
+        self.console.print(f"[green]ลบแชทใน Gemini แล้ว {total} แชท[/green]")
+        return True
+
+    def _delete_chat(self, chat_id: str) -> None:
+        self.page.goto(f"https://gemini.google.com/app/{chat_id}?hl=th")
+        self.check_not_blocked()
+        self.page.locator(EDITOR).first.wait_for(timeout=30_000)
+        self.page.locator(CHAT_ACTIONS_BUTTON).first.click(timeout=15_000)
+        self.page.locator(DELETE_MENU_ITEM).first.click(timeout=10_000)
+        dialog = self.page.locator(DIALOG).last
+        dialog.locator("button").filter(has_text=DIALOG_CONFIRM_DELETE).last.click(timeout=10_000)
+        dialog.wait_for(state="detached", timeout=15_000)
+
+        # Confirm on the server side: reopening a deleted chat redirects to a new chat (with a brief
+        # "not found" toast). It may flash cached messages first, so only trust "still there" once the
+        # messages have stayed on the chat's URL for a while.
+        time.sleep(DELETE_PAUSE_SECONDS)  # don't hammer the site; see CLAUDE.md
+        self.page.goto(f"https://gemini.google.com/app/{chat_id}?hl=th")
+        self.check_not_blocked()
+        deadline = time.monotonic() + 25
+        messages_seen_at = None
+        while time.monotonic() < deadline:
+            if chat_id not in self.page.url or self.page.get_by_text(CHAT_NOT_FOUND_TEXT).count():
+                return
+            if self.page.locator("user-query").count():
+                messages_seen_at = messages_seen_at or time.monotonic()
+                if time.monotonic() - messages_seen_at > DELETE_CONFIRM_SECONDS:
+                    raise PlaywrightError("แชทยังอยู่หลังจากกดลบ")
+            time.sleep(0.3)
+        raise PlaywrightError("ยืนยันไม่ได้ว่าแชทถูกลบแล้ว")
+
     # --- modes --------------------------------------------------------------------
 
     def current_mode(self) -> str:
@@ -322,13 +505,18 @@ class GeminiWeb:
         return True
 
 
-def handle_command(command: str, gemini: GeminiWeb, console: Console) -> bool:
-    """Run a slash command. Return False when the app should exit."""
+def handle_command(command: str, gemini: GeminiWeb, console: Console) -> str | None:
+    """Run a slash command. Return "exit" or "close" when the app should stop."""
     name, _, arg = command.partition(" ")
     arg = arg.strip()
     if name in ("/exit", "/quit"):
-        return False
-    if name == "/help":
+        return "exit"
+    if name == "/close":
+        # Gemini first: only close the terminal once the chats are really deleted.
+        if gemini.delete_session_chats():
+            return "close"
+        console.print("[yellow]ยังไม่ปิด terminal เพราะลบแชทไม่สำเร็จ ลองใหม่อีกครั้ง หรือดูด้วย /open[/yellow]")
+    elif name == "/help":
         console.print(HELP)
     elif name == "/new":
         gemini.open_new_chat()
@@ -343,10 +531,17 @@ def handle_command(command: str, gemini: GeminiWeb, console: Console) -> bool:
         show_chrome(gemini.page)
     else:
         console.print(f"[red]ไม่รู้จักคำสั่ง {name}[/red] พิมพ์ /help")
-    return True
+    return None
 
 
-def run_web(prompt: str, console: Console) -> None:
+def run_web(
+    prompt: str, console: Console, yolo: bool = False, session: str | None = None, resume: str | None = None
+) -> bool:
+    """Run the web-mode session. Return True if the user asked to close the terminal (/close).
+
+    With `session`, every chat this run creates is written to the session log so a later process
+    (`--continue`, `--list-chats`, `--delete`) can find it. With `resume`, keep using that chat.
+    """
     just_launched = ensure_chrome(console)
     playwright = sync_playwright().start()
     page = None
@@ -357,13 +552,23 @@ def run_web(prompt: str, console: Console) -> None:
         for other in context.pages:
             if other is not page and other.url in ("about:blank", "chrome://newtab/"):
                 other.close()
-        gemini = GeminiWeb(page, console, Path.cwd())
+        gemini = GeminiWeb(page, console, Path.cwd(), yolo=yolo)
         with console.status("[cyan]กำลังเปิด Gemini...[/cyan]"):
-            gemini.open_new_chat()
+            if not resume:
+                gemini.open_new_chat()
+            elif not gemini.open_chat(resume):
+                console.print(f"[dim]แชท {resume} ไม่อยู่แล้ว เริ่มแชทใหม่ให้แทน[/dim]")
+                if session:
+                    sessions.forget(session, resume)
 
         if prompt:
-            gemini.ask(prompt)
-            return
+            try:
+                gemini.ask(prompt)
+            finally:
+                for chat_id in gemini.chat_ids:
+                    if session:
+                        sessions.record(session, chat_id, prompt)
+            return False
 
         enable_line_editing()
         console.print(f"[bold cyan]Gemini Code[/bold cyan] · โหมดเว็บ · {gemini.current_mode()} · {Path.cwd()}")
@@ -375,18 +580,22 @@ def run_web(prompt: str, console: Console) -> None:
                 console.print()
                 continue
             except EOFError:
-                break
+                return False
             if not text:
                 continue
             try:
                 if text.startswith("/"):
-                    if not handle_command(text, gemini, console):
-                        break
+                    action = handle_command(text, gemini, console)
+                    if action:
+                        return action == "close"
                 else:
                     gemini.ask(text)
             except (PlaywrightError, TimeoutError) as e:
                 console.print(f"[red]เกิดข้อผิดพลาด: {str(e).splitlines()[0]}[/red]")
             console.print()
+    except BlockedByGoogle as e:
+        console.print(f"[bold red]หยุดทำงาน:[/bold red] {e}")
+        return False
     finally:
         if page is not None:
             try:
@@ -394,3 +603,42 @@ def run_web(prompt: str, console: Console) -> None:
             except PlaywrightError:
                 pass
         playwright.stop()
+
+
+def run_delete(chat_ids: list[str], console: Console, session: str | None = None) -> list[str]:
+    """Delete the given chats, pacing the requests like a person. Return the ids that are gone.
+
+    Only the ids passed in are touched -- never whatever chat the tab happens to be showing.
+    """
+    ensure_chrome(console)
+    playwright = sync_playwright().start()
+    page = None
+    deleted: list[str] = []
+    try:
+        browser = playwright.chromium.connect_over_cdp(CDP_URL)
+        context = browser.contexts[0]
+        page = open_background_tab(browser, context, keep_hidden=True)
+        gemini = GeminiWeb(page, console, Path.cwd())
+        for index, chat_id in enumerate(chat_ids):
+            if index:
+                time.sleep(BETWEEN_DELETES_SECONDS)
+            try:
+                with console.status(f"[cyan]กำลังลบแชท {chat_id}...[/cyan]"):
+                    gemini._delete_chat(chat_id)
+            except PlaywrightError as e:
+                console.print(f"[red]ลบแชท {chat_id} ไม่สำเร็จ: {str(e).splitlines()[0]}[/red]")
+                continue
+            deleted.append(chat_id)
+            if session:
+                sessions.forget(session, chat_id)
+            console.print(f"[green]ลบแชท {chat_id} แล้ว[/green]")
+    except BlockedByGoogle as e:
+        console.print(f"[bold red]หยุดทำงาน:[/bold red] {e}")
+    finally:
+        if page is not None:
+            try:
+                page.close()
+            except PlaywrightError:
+                pass
+        playwright.stop()
+    return deleted

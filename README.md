@@ -10,11 +10,12 @@
 ## ติดตั้ง
 
 ```bash
-cd "/Users/wsongaksorn/Library/CloudStorage/GoogleDrive-wannuwat2001@gmail.com/My Drive/AI plus/Work/Websites/StartUp/CLI"
+git clone https://github.com/wannuwat-s/gemini-code.git
+cd gemini-code
 ./setup.sh
 ```
 
-1. เพิ่ม alias ที่ setup.sh แสดงไว้ใน `~/.zshrc` แล้วเปิด terminal ใหม่
+1. เพิ่มฟังก์ชัน `gcode` ที่ setup.sh แสดงไว้ใน `~/.zshrc` แล้วเปิด terminal ใหม่
 2. (โหมด API เท่านั้น) สร้าง API key ฟรีที่ https://aistudio.google.com/apikey แล้วใส่ใน `.env`: `GEMINI_API_KEY=...`
 
 > venv ถูกสร้างที่ `~/.venvs/gemini-code` (นอก Google Drive) เพื่อไม่ให้ Drive ต้อง sync ไฟล์ไลบรารีนับพันไฟล์
@@ -37,8 +38,14 @@ gcode "แปลคำว่า hello เป็นภาษาญี่ปุ่
 - รูปที่ Gemini สร้างจะถูกดาวน์โหลด**ขนาดเต็ม**มาเซฟเป็น `gemini_วันที่_เวลา_ลำดับ.jpeg` ในโฟลเดอร์ที่เรียก gcode
   ถ้าดาวน์โหลดขนาดเต็มไม่ได้ จะเซฟขนาดพรีวิวแทนและบอกไว้
 
-คำสั่ง: `/help` `/new` (แชทใหม่) `/mode [ชื่อ]` (เช่น `/mode 3.1 Pro`, `/mode flash`) `/open` (ดูแท็บใน Chrome) `/exit`
+คำสั่ง: `/help` `/new` (แชทใหม่) `/mode [ชื่อ]` (เช่น `/mode 3.1 Pro`, `/mode flash`) `/open` (ดูแท็บใน Chrome)
+`/close` `/exit` (ออกโดยเก็บแชทไว้)
 กด Ctrl+C ระหว่างรอ = หยุดคำตอบ
+
+**`/close`** ลบแชททุกอันที่ terminal นี้สร้าง (รวมแชทที่เปิดด้วย `/new`) ออกจาก Gemini แล้วค่อยปิด terminal
+- ลบฝั่ง Gemini ก่อน และตรวจซ้ำว่าแชทหายจริง ถ้าลบไม่สำเร็จจะ**ไม่ปิด** terminal และแจ้ง error
+- การปิด terminal ทำผ่านฟังก์ชัน `gcode` ใน `~/.zshrc` (แอปออกด้วย exit code 99 → ฟังก์ชันสั่ง `exit` ให้ shell)
+  ถ้าเรียก `./gcode` ตรงๆ แอปจะลบแชทแล้วบอกให้ปิดหน้าต่างเอง
 
 **ข้อควรรู้**
 - การควบคุมเว็บ Gemini ด้วยสคริปต์ขัดกับแนวทางการเข้าถึงอัตโนมัติของ Google มีความเสี่ยงที่บัญชีจะถูกจำกัด ใช้อย่างพอประมาณ
@@ -94,6 +101,29 @@ gcode --api --yolo     # อนุมัติทุกอย่างอัต�
 
 ---
 
+## เรียกจากสคริปต์ / จาก Claude Code
+
+โหมด one-shot (`gcode "คำสั่ง"`) จบแล้วออกทันที จึงมีธงสำหรับผูกแชทที่สร้างไว้กับ "session" ของผู้เรียก
+เพื่อให้ process อื่นกลับมาคุยต่อหรือลบแชทนั้นได้ ข้อมูลเก็บที่ `~/.gemini-code/sessions/<key>.json`
+
+| ธง | ทำอะไร |
+|---|---|
+| `--session KEY` | จดแชทที่รันนี้สร้าง ไว้ใต้คีย์ KEY |
+| `-c`, `--continue` | คุยต่อในแชทล่าสุดของ `--session` (ถ้าแชทถูกลบไปแล้วจะเปิดแชทใหม่ให้) |
+| `--resume CHAT_ID` | คุยต่อในแชทที่ระบุ |
+| `--list-chats` | แสดงแชทของ `--session` เป็น JSON (`id`, `prompts`, `created_at`, `updated_at`) |
+| `--delete CHAT_ID ...` | ลบแชทตามรหัสที่ระบุ เว้นจังหวะระหว่างการลบให้เอง |
+
+```bash
+gcode --session "$CLAUDE_CODE_SESSION_ID" -c "สร้างรูปโลมาให้หน่อย"
+gcode --session "$CLAUDE_CODE_SESSION_ID" --list-chats
+gcode --session "$CLAUDE_CODE_SESSION_ID" --delete 1a2b3c4d
+```
+
+ใน Claude Code มีคำสั่ง `/gcode` และ `/gcodeclose` (อยู่ที่ `~/.claude/commands/`) ที่ห่อสามคำสั่งนี้ไว้
+โดยใช้ `$CLAUDE_CODE_SESSION_ID` เป็นคีย์ แชท Gemini จึงผูกกับแชท Claude ที่สั่งเท่านั้น
+`--delete` ลบเฉพาะรหัสที่ส่งเข้าไป ไม่เคยอ่านรหัสจาก URL ปัจจุบัน
+
 ## โครงสร้างโค้ด
 
 ```
@@ -104,6 +134,7 @@ gemini_code/
   tools.py      นิยามและโค้ดของแต่ละ tool (เพิ่ม tool ใหม่ได้ที่นี่)
   usage.py      นับการใช้งานและโควตา (โหมด API)
   prompt.py     รับข้อความจาก terminal
+  sessions.py   จดแชทที่แต่ละ --session สร้าง (~/.gemini-code/sessions) ให้ process อื่นคุยต่อ/ลบได้
 gcode           launcher เรียกได้จากทุกโฟลเดอร์
 setup.sh        ติดตั้ง venv + dependencies
 ```

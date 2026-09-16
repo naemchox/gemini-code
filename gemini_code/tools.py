@@ -4,7 +4,9 @@ import difflib
 import fnmatch
 import os
 import re
+import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -188,6 +190,34 @@ def edit_file(**kwargs) -> str:
     return f"Edited {p}"
 
 
+def _plan_delete(path: str) -> Path:
+    p = _resolve(path)
+    if not p.exists():
+        raise ToolError(f"File not found: {p}")
+    if p.is_dir():
+        raise ToolError(f"{p} is a directory; only files can be deleted")
+    return p
+
+
+def preview_delete(path: str) -> str:
+    p = _plan_delete(path)
+    return f"- (delete) {_display(p)}  ({p.stat().st_size:,} bytes, moved to the Trash)"
+
+
+def delete_file(path: str) -> str:
+    p = _plan_delete(path)
+    if shutil.which("trash"):  # macOS 15+: supports "Put Back" in Finder
+        proc = subprocess.run(["trash", str(p)], capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise ToolError(f"trash failed: {proc.stderr.strip()}")
+    else:
+        target = Path.home() / ".Trash" / p.name
+        if target.exists():
+            target = target.with_name(f"{p.stem} {int(time.time())}{p.suffix}")
+        shutil.move(p, target)
+    return f"Moved {p} to the Trash"
+
+
 def run_shell(command: str, timeout: int = 120) -> str:
     try:
         proc = subprocess.run(
@@ -287,6 +317,18 @@ TOOLS: dict[str, Tool] = {t.name: t for t in [
         func=edit_file,
         needs_approval=True,
         preview=preview_edit,
+    ),
+    Tool(
+        name="delete_file",
+        description="Delete a file by moving it to the Trash (recoverable). Directories are not supported.",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "File path"}},
+            "required": ["path"],
+        },
+        func=delete_file,
+        needs_approval=True,
+        preview=preview_delete,
     ),
     Tool(
         name="run_shell",

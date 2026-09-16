@@ -16,4 +16,5 @@ fi
 
 echo
 echo "ติดตั้งเสร็จ เพิ่มบรรทัดนี้ใน ~/.zshrc เพื่อเรียกใช้ด้วยคำสั่ง gcode ได้ทุกที่:"
-echo "  alias gcode='\"$APP_DIR/gcode\"'"
+echo "(เป็นฟังก์ชันแทน alias เพื่อให้ /close ปิด terminal ได้: exit code 99 = ให้ปิด shell)"
+echo "  gcode() { GCODE_SHELL_FUNCTION=1 \"$APP_DIR/gcode\" \"\$@\"; local code=\$?; [ \$code -eq 99 ] && exit 0; return \$code; }"

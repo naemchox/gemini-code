@@ -10,10 +10,9 @@ from google import genai
 from google.genai import errors, types
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.syntax import Syntax
-from rich.text import Text
 
-from .tools import TOOL_DECLARATIONS, TOOLS, ToolError
+from .runner import ToolRunner
+from .tools import TOOL_DECLARATIONS
 from .usage import UsageTracker
 
 MAX_STEPS = 60
@@ -60,21 +59,13 @@ def _retry_delay(err: errors.APIError) -> float | None:
     return float(match.group(1)) + 1 if match else None
 
 
-def _short(value, limit: int = 80) -> str:
-    text = str(value)
-    if "\n" in text:
-        return f"<{len(text.splitlines())} lines>"
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
 class Agent:
     def __init__(self, client: genai.Client, model: str, console: Console, yolo: bool = False):
         self.client = client
         self.model = model
         self.console = console
-        self.yolo = yolo
+        self.runner = ToolRunner(console, yolo=yolo)
         self.history: list[types.Content] = []
-        self.always_allowed: set[str] = set()
         self.usage = UsageTracker()
         self.reset()
 
@@ -147,54 +138,5 @@ class Agent:
             self.console.print(Markdown(text))
 
     def _run_tool(self, call: types.FunctionCall) -> types.Part:
-        args = dict(call.args or {})
-        arg_summary = ", ".join(f"{k}={_short(v)}" for k, v in args.items())
-        self.console.print(Text(f"● {call.name}({arg_summary})", style="bold magenta"))
-
-        tool = TOOLS.get(call.name)
-        try:
-            if tool is None:
-                raise ToolError(f"Unknown tool: {call.name}")
-            if tool.needs_approval and not self.yolo and call.name not in self.always_allowed:
-                if tool.preview:
-                    self.console.print(Syntax(tool.preview(**args), "diff", theme="ansi_dark", word_wrap=True))
-                denial = self._ask_permission(call.name)
-                if denial:
-                    raise ToolError(denial)
-            result = {"output": tool.func(**args)}
-            self._print_result(result["output"], style="dim")
-        except ToolError as e:
-            result = {"error": str(e)}
-            self._print_result(str(e), style="red")
-        except (TypeError, ValueError) as e:
-            result = {"error": f"Invalid arguments: {e}"}
-            self._print_result(result["error"], style="red")
-        except OSError as e:
-            result = {"error": f"{type(e).__name__}: {e}"}
-            self._print_result(result["error"], style="red")
-
+        result = self.runner.run(call.name, dict(call.args or {}))
         return types.Part(function_response=types.FunctionResponse(id=call.id, name=call.name, response=result))
-
-    def _print_result(self, text: str, style: str, max_lines: int = 6) -> None:
-        lines = text.splitlines() or [""]
-        shown = "\n".join(f"  ⎿ {line}" if i == 0 else f"    {line}" for i, line in enumerate(lines[:max_lines]))
-        if len(lines) > max_lines:
-            shown += f"\n    … (+{len(lines) - max_lines} บรรทัด)"
-        self.console.print(Text(shown, style=style))
-
-    def _ask_permission(self, tool_name: str) -> str | None:
-        """Return None if allowed, otherwise a denial message for the model."""
-        while True:
-            answer = self.console.input(
-                f"[bold]อนุญาตไหม?[/bold] [green]y[/green]=ใช่  "
-                f"[green]a[/green]=ใช่ทุกครั้งสำหรับ {tool_name} ในเซสชันนี้  [red]n[/red]=ไม่: "
-            ).strip().lower()
-            if answer in ("y", "yes"):
-                return None
-            if answer in ("a", "always"):
-                self.always_allowed.add(tool_name)
-                return None
-            if answer in ("n", "no"):
-                feedback = self.console.input("บอก Gemini ว่าควรทำอะไรแทน (Enter เพื่อข้าม): ").strip()
-                message = "The user denied this tool call."
-                return f"{message} User feedback: {feedback}" if feedback else message
