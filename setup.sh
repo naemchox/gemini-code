@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Create the virtualenv outside Google Drive (so Drive doesn't sync thousands of files), install deps,
-# and link the Claude Code commands so /gcode works right after cloning this one repo.
+# link the Claude Code commands and add the shell function, so both /gcode and `gcode` work
+# right after cloning this one repo.
 set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV="${GCODE_VENV:-$HOME/.venvs/gemini-code}"
 CLAUDE_COMMANDS="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
+SHELL_RC="${GCODE_SHELL_RC:-$HOME/.zshrc}"
 
 python3 -m venv "$VENV"
 "$VENV/bin/pip" install -q --upgrade pip
@@ -37,9 +39,32 @@ for name in gcode gcodeclose; do
   fi
 done
 
+# The `gcode` command in the terminal. A function and not an alias so that /close can close the
+# window: exit code 99 from the app means "close this shell". Written between markers, so running
+# setup.sh again after moving the repo rewrites the block instead of stacking a stale copy.
+GCODE_FUNC="gcode() { GCODE_SHELL_FUNCTION=1 \"$APP_DIR/gcode\" \"\$@\"; local code=\$?; [ \$code -eq 99 ] && exit 0; return \$code; }"
+BEGIN_MARK="# >>> gcode >>>"
+END_MARK="# <<< gcode <<<"
+
 echo
-echo "ติดตั้งเสร็จ เพิ่มบรรทัดนี้ใน ~/.zshrc เพื่อเรียกใช้ด้วยคำสั่ง gcode ได้ทุกที่:"
-echo "(เป็นฟังก์ชันแทน alias เพื่อให้ /close ปิด terminal ได้: exit code 99 = ให้ปิด shell)"
-echo "  gcode() { GCODE_SHELL_FUNCTION=1 \"$APP_DIR/gcode\" \"\$@\"; local code=\$?; [ \$code -eq 99 ] && exit 0; return \$code; }"
+if [ -e "$SHELL_RC" ] && grep -qF "$BEGIN_MARK" "$SHELL_RC"; then
+  tmp="$(mktemp)"
+  awk -v begin="$BEGIN_MARK" -v end="$END_MARK" -v fn="$GCODE_FUNC" '
+    $0 == begin { print; print fn; skip = 1; next }
+    $0 == end   { print; skip = 0; next }
+    !skip
+  ' "$SHELL_RC" > "$tmp"
+  cat "$tmp" > "$SHELL_RC"   # overwrite in place, so permissions and symlinks on the rc file survive
+  rm -f "$tmp"
+  echo "อัปเดตฟังก์ชัน gcode ใน $SHELL_RC แล้ว (ชี้มาที่ $APP_DIR)"
+elif [ -e "$SHELL_RC" ] && grep -qE '^[[:space:]]*(gcode[[:space:]]*\(\)|alias[[:space:]]+gcode=)' "$SHELL_RC"; then
+  echo "ข้าม $SHELL_RC — มี gcode ของเดิมอยู่ในไฟล์แล้ว ถ้าต้องการให้ชี้มาที่ repo นี้ ลบของเก่าแล้วใส่บรรทัดนี้แทน:"
+  echo "  $GCODE_FUNC"
+else
+  printf '\n%s\n%s\n%s\n' "$BEGIN_MARK" "$GCODE_FUNC" "$END_MARK" >> "$SHELL_RC"
+  echo "เพิ่มฟังก์ชัน gcode ใน $SHELL_RC แล้ว"
+fi
+
 echo
-echo "จากนั้นเปิด terminal ใหม่ แล้วรัน gcode หนึ่งครั้งเพื่อลงชื่อเข้าใช้ Google ในหน้าต่าง Chrome ที่เปิดขึ้นมา"
+echo "ติดตั้งเสร็จ เปิด terminal ใหม่ (หรือ source $SHELL_RC) แล้วรัน gcode หนึ่งครั้ง"
+echo "เพื่อลงชื่อเข้าใช้ Google ในหน้าต่าง Chrome ที่เปิดขึ้นมา"

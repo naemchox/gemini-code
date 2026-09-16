@@ -15,12 +15,17 @@ cd gemini-code
 ./setup.sh
 ```
 
-1. เพิ่มฟังก์ชัน `gcode` ที่ setup.sh แสดงไว้ใน `~/.zshrc` แล้วเปิด terminal ใหม่
-2. รัน `gcode` หนึ่งครั้ง แล้วลงชื่อเข้าใช้ Google ในหน้าต่าง Chrome ที่เปิดขึ้นมา
-3. (โหมด API เท่านั้น) สร้าง API key ฟรีที่ https://aistudio.google.com/apikey แล้วใส่ใน `.env`: `GEMINI_API_KEY=...`
+1. เปิด terminal ใหม่ (หรือ `source ~/.zshrc`) แล้วรัน `gcode` หนึ่งครั้ง
+   ลงชื่อเข้าใช้ Google ในหน้าต่าง Chrome ที่เปิดขึ้นมา
+2. (โหมด API เท่านั้น) สร้าง API key ฟรีที่ https://aistudio.google.com/apikey แล้วใส่ใน `.env`: `GEMINI_API_KEY=...`
 
-setup.sh ทำให้ด้วย: สร้าง venv, ลง dependencies, สร้าง `.env` จากตัวอย่าง และลิงก์ `/gcode` `/gcodeclose`
-เข้า `~/.claude/commands/` ให้ใช้ใน Claude Code ได้ทันที (ถ้ามีไฟล์ชื่อเดียวกันอยู่แล้วจะข้าม ไม่ทับให้)
+setup.sh ทำให้ครบ: สร้าง venv, ลง dependencies, สร้าง `.env` จากตัวอย่าง, เพิ่มฟังก์ชัน `gcode` ใน
+`~/.zshrc` (ใช้ในเทอร์มินัล) และลิงก์ `/gcode` `/gcodeclose` เข้า `~/.claude/commands/` (ใช้ใน Claude Code)
+ทั้งสองอย่างจะ**ข้ามให้เอง ไม่ทับของเดิม** ถ้ามี `gcode` อยู่ใน `~/.zshrc` หรือมีไฟล์ชื่อเดียวกันใน
+`~/.claude/commands/` อยู่แล้ว — กรณีนั้น setup.sh จะบอกว่าต้องเติมอะไรเอง
+
+รัน `./setup.sh` ซ้ำได้เสมอ ถ้าย้ายโฟลเดอร์ repo มันจะเขียนทับบล็อกเดิมใน `~/.zshrc` ให้ชี้ที่ใหม่
+(ใช้ shell อื่น: `GCODE_SHELL_RC=~/.bashrc ./setup.sh`)
 
 **ต้องมี:** macOS และ Google Chrome — โหมดเว็บสั่ง Chrome จริงผ่าน CDP และใช้ AppleScript ซ่อน/แสดงหน้าต่าง
 ไม่ต้องรัน `playwright install` เพราะไม่ได้ใช้ browser ที่ Playwright โหลดมา
