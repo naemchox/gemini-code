@@ -120,6 +120,9 @@ def main() -> None:
     parser.add_argument("-c", "--continue", dest="continue_chat", action="store_true",
                         help="คุยต่อในแชทล่าสุดของ --session แทนที่จะเปิดแชทใหม่")
     parser.add_argument("--resume", metavar="CHAT_ID", help="คุยต่อในแชทที่ระบุ")
+    parser.add_argument("--chats", action="store_true", help="แสดงแชทที่มีอยู่แล้วใน Gemini แล้วออก")
+    parser.add_argument("--chat", metavar="CHAT_ID", help="เข้าไปคุยต่อในแชทที่มีอยู่แล้ว (ไม่นับเป็นแชทของ gcode)")
+    parser.add_argument("--json", action="store_true", help="ให้ --chats ออกผลเป็น JSON")
     parser.add_argument("--list-chats", action="store_true", help="แสดงแชทของ --session เป็น JSON แล้วออก")
     parser.add_argument("--delete", metavar="CHAT_ID", nargs="+", help="ลบแชทตามรหัสที่ระบุแล้วออก")
     args = parser.parse_args()
@@ -131,6 +134,20 @@ def main() -> None:
             console.print("[red]--list-chats ต้องใช้คู่กับ --session[/red]")
             sys.exit(1)
         print(json.dumps(sessions.load(args.session), ensure_ascii=False))
+        return
+
+    if args.chats:
+        from .web import run_list_chats
+
+        chats = run_list_chats(console)
+        if args.json:
+            print(json.dumps(chats, ensure_ascii=False))
+        elif not chats:
+            console.print("[dim]ไม่พบแชทในแถบรายการ[/dim]")
+        else:
+            for i, chat in enumerate(chats, 1):
+                console.print(f"  [bold]{i:>2}[/bold]. {chat['title']}  [dim]{chat['id']}[/dim]", highlight=False)
+            console.print("\n[dim]คุยต่อในแชทไหน: gcode --chat <id> หรือเปิด gcode แล้วพิมพ์ /chats[/dim]")
         return
 
     if args.delete:
@@ -146,9 +163,16 @@ def main() -> None:
         from .web import run_web
 
         resume = args.resume or (sessions.latest(args.session) if args.continue_chat and args.session else None)
+        if args.chat:
+            resume = None  # --chat joins someone else's chat; it must not be logged or deleted
         try:
             close_terminal = run_web(
-                " ".join(args.prompt), console, yolo=args.yolo, session=args.session, resume=resume
+                " ".join(args.prompt),
+                console,
+                yolo=args.yolo,
+                session=args.session,
+                resume=resume,
+                attach=args.chat,
             )
         except KeyboardInterrupt:
             return

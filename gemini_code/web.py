@@ -49,6 +49,7 @@ CHAT_ACTIONS_BUTTON = (
     'button[aria-label="เปิดเมนูสําหรับการดําเนินการที่เกี่ยวกับการสนทนา"], '
     'button[aria-label="Open menu for conversation actions"]'
 )
+CONVERSATION = '[data-test-id="conversation"]'
 DELETE_MENU_ITEM = '[data-test-id="delete-button"]'
 DIALOG = "mat-dialog-container, [role=dialog]"
 DIALOG_CONFIRM_DELETE = re.compile(r"^\s*(ลบ|Delete)\s*$")
@@ -65,6 +66,7 @@ DELETE_CONFIRM_SECONDS = 8
 DELETE_PAUSE_SECONDS = 3
 BETWEEN_DELETES_SECONDS = 8  # a person doesn't delete chats back to back; see CLAUDE.md
 RESUME_SETTLE_SECONDS = 2
+SIDEBAR_LOAD_MS = 4000
 RESULTS_PAUSE_SECONDS = 2
 BLOCKED_URL = "google.com/sorry"
 
@@ -109,6 +111,13 @@ CANVAS_JS = """img => {
   return c.toDataURL('image/png');
 }"""
 
+# Every chat in the sidebar: its id comes from the link (/app/<id>), its name from the row's text.
+SIDEBAR_CHATS_JS = f"""() => [...document.querySelectorAll('{CONVERSATION}')].map(e => {{
+  const id = ((e.querySelector('a')?.getAttribute('href') || '').match(/\\/app\\/([0-9a-f]+)/) || [])[1];
+  const title = (e.innerText || '').trim().split('\\n')[0];
+  return id ? {{id, title}} : null;
+}}).filter(Boolean)"""
+
 VISIBLE_TEXTS_JS = """() => [...document.querySelectorAll('body *')]
   .filter(e => e.offsetParent !== null && e.children.length === 0 && (e.innerText || '').trim())
   .map(e => e.innerText.trim())"""
@@ -116,6 +125,8 @@ VISIBLE_TEXTS_JS = """() => [...document.querySelectorAll('body *')]
 HELP = """[bold]คำสั่ง (โหมดเว็บ)[/bold]
   /help            แสดงวิธีใช้
   /new             เริ่มแชทใหม่
+  /chats           แสดงแชทที่มีอยู่แล้วใน Gemini
+  /resume <เลข|id>  เข้าไปคุยต่อในแชทนั้น (แชทของคุณเองจะไม่ถูกลบด้วย /close)
   /mode [ชื่อ]      ดูหรือเปลี่ยนโมเดล เช่น /mode 3.1 Pro
   /open            สลับไปดูแท็บนี้ใน Chrome
   /close           ลบแชทของ terminal นี้ออกจาก Gemini แล้วปิด terminal
@@ -209,6 +220,7 @@ class GeminiWeb:
         self.save_dir = save_dir
         self.runner = ToolRunner(console, yolo=yolo)
         self.chat_ids: list[str] = []  # every Gemini chat this terminal session created
+        self.attached: set[str] = set()  # chats we only joined -- never recorded, never deleted
         self.needs_protocol = True  # the first message of each chat teaches Gemini the @@ actions
 
     def check_not_blocked(self) -> None:
@@ -233,22 +245,36 @@ class GeminiWeb:
             self.page.goto(GEMINI_URL)
             self.page.locator(EDITOR).first.wait_for(timeout=30_000)
 
-    def open_chat(self, chat_id: str) -> bool:
-        """Continue an existing chat. Return False (and open a new chat instead) if it is gone.
+    def open_chat(self, chat_id: str, track: bool = True) -> bool:
+        """Continue an existing chat. Return False, having opened nothing, if it is gone.
 
         A deleted chat redirects to a fresh chat, so trust the URL only after it has settled.
+        `track` says whether this chat counts as one of ours: True for a chat gcode started and may
+        later delete, False for one the user made in the browser and we are only joining.
         """
         self.page.goto(f"https://gemini.google.com/app/{chat_id}?hl=th")
         self.check_not_blocked()
         self.page.locator(EDITOR).first.wait_for(timeout=30_000)
         time.sleep(RESUME_SETTLE_SECONDS)
         if self.page.locator(SIGN_IN).count() or chat_id not in self.page.url:
-            self.open_new_chat()
             return False
-        self.needs_protocol = False  # this chat already learned the @@ protocol
-        if chat_id not in self.chat_ids:
-            self.chat_ids.append(chat_id)
+        self.needs_protocol = False  # don't teach the @@ protocol into a chat that is already going
+        if track:
+            if chat_id not in self.chat_ids:
+                self.chat_ids.append(chat_id)
+        else:
+            self.attached.add(chat_id)
         return True
+
+    def list_chats(self) -> list[dict]:
+        """Every chat in the sidebar, newest first. Reads the list the page already loaded and never
+        opens a chat to look inside it (CLAUDE.md rule 4)."""
+        if "gemini.google.com" not in self.page.url:
+            self.page.goto(GEMINI_URL)
+            self.check_not_blocked()
+            self.page.locator(EDITOR).first.wait_for(timeout=30_000)
+        self.page.wait_for_timeout(SIDEBAR_LOAD_MS)
+        return self.page.evaluate(SIDEBAR_CHATS_JS)
 
     # --- chatting ---------------------------------------------------------------
 
@@ -318,7 +344,7 @@ class GeminiWeb:
     def _remember_chat(self) -> None:
         """Record the chat id once Gemini assigns one (the URL changes to /app/<id>), so /close can delete it."""
         match = CHAT_ID_IN_URL.search(self.page.url)
-        if match and match.group(1) not in self.chat_ids:
+        if match and match.group(1) not in self.chat_ids and match.group(1) not in self.attached:
             self.chat_ids.append(match.group(1))
 
     def _print_markdown(self, response: Locator) -> None:
@@ -521,6 +547,27 @@ def handle_command(command: str, gemini: GeminiWeb, console: Console) -> str | N
     elif name == "/new":
         gemini.open_new_chat()
         console.print("[green]เริ่มแชทใหม่แล้ว[/green]")
+    elif name == "/chats":
+        gemini.listed_chats = gemini.list_chats()
+        if not gemini.listed_chats:
+            console.print("[dim]ไม่พบแชทในแถบรายการ[/dim]")
+        for i, chat in enumerate(gemini.listed_chats, 1):
+            console.print(f"  [bold]{i:>2}[/bold]. {chat['title']}  [dim]{chat['id']}[/dim]", highlight=False)
+        console.print("[dim]พิมพ์ /resume <เลข> เพื่อเข้าไปคุยต่อ[/dim]")
+    elif name == "/resume":
+        chat_id = arg
+        if arg.isdigit():  # a number refers to the list /chats just printed
+            listed = getattr(gemini, "listed_chats", [])
+            if not 1 <= int(arg) <= len(listed):
+                console.print("[red]ไม่มีเลขนั้นในรายการ[/red] พิมพ์ /chats ก่อน")
+                return None
+            chat_id = listed[int(arg) - 1]["id"]
+        if not chat_id:
+            console.print("[red]ใส่เลขหรือ chat id ด้วย[/red] เช่น /resume 3")
+        elif gemini.open_chat(chat_id, track=False):
+            console.print(f"[green]เข้าแชท {chat_id} แล้ว[/green] [dim]แชทนี้จะไม่ถูกลบด้วย /close[/dim]")
+        else:
+            console.print(f"[red]ไม่พบแชท {chat_id}[/red]")
     elif name == "/mode":
         if arg and not gemini.set_mode(arg):
             console.print(f"[red]ไม่พบโหมด {arg}[/red]")
@@ -535,12 +582,18 @@ def handle_command(command: str, gemini: GeminiWeb, console: Console) -> str | N
 
 
 def run_web(
-    prompt: str, console: Console, yolo: bool = False, session: str | None = None, resume: str | None = None
+    prompt: str,
+    console: Console,
+    yolo: bool = False,
+    session: str | None = None,
+    resume: str | None = None,
+    attach: str | None = None,
 ) -> bool:
     """Run the web-mode session. Return True if the user asked to close the terminal (/close).
 
     With `session`, every chat this run creates is written to the session log so a later process
     (`--continue`, `--list-chats`, `--delete`) can find it. With `resume`, keep using that chat.
+    With `attach`, join a chat the user made themselves: it is never logged and never deleted.
     """
     just_launched = ensure_chrome(console)
     playwright = sync_playwright().start()
@@ -554,12 +607,17 @@ def run_web(
                 other.close()
         gemini = GeminiWeb(page, console, Path.cwd(), yolo=yolo)
         with console.status("[cyan]กำลังเปิด Gemini...[/cyan]"):
-            if not resume:
+            if attach:
+                if not gemini.open_chat(attach, track=False):
+                    console.print(f"[red]ไม่พบแชท {attach}[/red] ดูรายชื่อได้ด้วย gcode --chats")
+                    return False
+            elif not resume:
                 gemini.open_new_chat()
             elif not gemini.open_chat(resume):
                 console.print(f"[dim]แชท {resume} ไม่อยู่แล้ว เริ่มแชทใหม่ให้แทน[/dim]")
                 if session:
                     sessions.forget(session, resume)
+                gemini.open_new_chat()
 
         if prompt:
             try:
@@ -642,3 +700,28 @@ def run_delete(chat_ids: list[str], console: Console, session: str | None = None
                 pass
         playwright.stop()
     return deleted
+
+
+def run_list_chats(console: Console) -> list[dict]:
+    """The chats already in the user's Gemini sidebar, newest first. One page load, nothing opened."""
+    ensure_chrome(console)
+    playwright = sync_playwright().start()
+    page = None
+    chats: list[dict] = []
+    try:
+        browser = playwright.chromium.connect_over_cdp(CDP_URL)
+        page = open_background_tab(browser, browser.contexts[0], keep_hidden=True)
+        gemini = GeminiWeb(page, console, Path.cwd())
+        with console.status("[cyan]กำลังอ่านรายการแชท...[/cyan]"):
+            gemini.open_new_chat()
+            chats = gemini.list_chats()
+    except BlockedByGoogle as e:
+        console.print(f"[bold red]หยุดทำงาน:[/bold red] {e}")
+    finally:
+        if page is not None:
+            try:
+                page.close()
+            except PlaywrightError:
+                pass
+        playwright.stop()
+    return chats
