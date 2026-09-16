@@ -16,9 +16,19 @@ cd gemini-code
 ```
 
 1. เพิ่มฟังก์ชัน `gcode` ที่ setup.sh แสดงไว้ใน `~/.zshrc` แล้วเปิด terminal ใหม่
-2. (โหมด API เท่านั้น) สร้าง API key ฟรีที่ https://aistudio.google.com/apikey แล้วใส่ใน `.env`: `GEMINI_API_KEY=...`
+2. รัน `gcode` หนึ่งครั้ง แล้วลงชื่อเข้าใช้ Google ในหน้าต่าง Chrome ที่เปิดขึ้นมา
+3. (โหมด API เท่านั้น) สร้าง API key ฟรีที่ https://aistudio.google.com/apikey แล้วใส่ใน `.env`: `GEMINI_API_KEY=...`
+
+setup.sh ทำให้ด้วย: สร้าง venv, ลง dependencies, สร้าง `.env` จากตัวอย่าง และลิงก์ `/gcode` `/gcodeclose`
+เข้า `~/.claude/commands/` ให้ใช้ใน Claude Code ได้ทันที (ถ้ามีไฟล์ชื่อเดียวกันอยู่แล้วจะข้าม ไม่ทับให้)
+
+**ต้องมี:** macOS และ Google Chrome — โหมดเว็บสั่ง Chrome จริงผ่าน CDP และใช้ AppleScript ซ่อน/แสดงหน้าต่าง
+ไม่ต้องรัน `playwright install` เพราะไม่ได้ใช้ browser ที่ Playwright โหลดมา
 
 > venv ถูกสร้างที่ `~/.venvs/gemini-code` (นอก Google Drive) เพื่อไม่ให้ Drive ต้อง sync ไฟล์ไลบรารีนับพันไฟล์
+>
+> การลงชื่อเข้าใช้เก็บอยู่ที่ `~/.gemini-code/chrome-profile/` ซึ่งเป็นโปรไฟล์ Chrome แยกจากของที่ใช้อยู่ประจำ
+> ไม่ได้อยู่ใน repo แต่ละคนที่โคลนไปใช้จึงลงชื่อเข้าใช้ด้วยบัญชี Google ของตัวเอง
 
 ---
 
@@ -120,8 +130,16 @@ gcode --session "$CLAUDE_CODE_SESSION_ID" --list-chats
 gcode --session "$CLAUDE_CODE_SESSION_ID" --delete 1a2b3c4d
 ```
 
-ใน Claude Code มีคำสั่ง `/gcode` และ `/gcodeclose` (อยู่ที่ `~/.claude/commands/`) ที่ห่อสามคำสั่งนี้ไว้
-โดยใช้ `$CLAUDE_CODE_SESSION_ID` เป็นคีย์ แชท Gemini จึงผูกกับแชท Claude ที่สั่งเท่านั้น
+คำสั่ง `/gcode` และ `/gcodeclose` สำหรับ Claude Code อยู่ใน `commands/` ของ repo นี้ และ setup.sh
+ลิงก์เข้า `~/.claude/commands/` ให้แล้ว (`git pull` ที่นี่จึงอัปเดตคำสั่งไปด้วย)
+
+| คำสั่ง | ทำอะไร |
+|---|---|
+| `/gcode <สิ่งที่อยากให้ทำ>` | ส่งเฉพาะข้อความนั้นไปให้ Gemini แล้วเอาคำตอบกลับมา ครั้งถัดไปคุยต่อในแชทเดิม |
+| `/gcode --new <...>` | บังคับเปิดแชท Gemini ใหม่ |
+| `/gcodeclose` | ลบแชท Gemini ที่แชท Claude นั้นสร้าง โดยถามยืนยันก่อนเสมอ |
+
+ทั้งคู่ใช้ `$CLAUDE_CODE_SESSION_ID` เป็นคีย์ แชท Gemini จึงผูกกับแชท Claude ที่สั่งเท่านั้น
 `--delete` ลบเฉพาะรหัสที่ส่งเข้าไป ไม่เคยอ่านรหัสจาก URL ปัจจุบัน
 
 ## โครงสร้างโค้ด
@@ -135,6 +153,7 @@ gemini_code/
   usage.py      นับการใช้งานและโควตา (โหมด API)
   prompt.py     รับข้อความจาก terminal
   sessions.py   จดแชทที่แต่ละ --session สร้าง (~/.gemini-code/sessions) ให้ process อื่นคุยต่อ/ลบได้
+commands/       /gcode และ /gcodeclose สำหรับ Claude Code (setup.sh ลิงก์เข้า ~/.claude/commands)
 gcode           launcher เรียกได้จากทุกโฟลเดอร์
-setup.sh        ติดตั้ง venv + dependencies
+setup.sh        ติดตั้ง venv + dependencies + ลิงก์คำสั่ง
 ```
