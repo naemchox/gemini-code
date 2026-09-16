@@ -1,4 +1,6 @@
 ---
+# ⚠️ ไฟล์นี้มีอีกก๊อปปี้ที่ repos/claude-config/commands/ (repo: wannuwat-s/claude-config)
+# แก้ที่นี่แล้วต้องคัดลอกไปทับอีกที่ด้วย ไม่งั้นสองเครื่องจะทำงานไม่เหมือนกัน
 description: ลบแชท Gemini ที่ถูกสร้างจากแชท Claude นี้เท่านั้น
 allowed-tools: Bash(gcode:*)
 ---

@@ -1,4 +1,6 @@
 ---
+# ⚠️ ไฟล์นี้มีอีกก๊อปปี้ที่ repos/claude-config/commands/ (repo: wannuwat-s/claude-config)
+# แก้ที่นี่แล้วต้องคัดลอกไปทับอีกที่ด้วย ไม่งั้นสองเครื่องจะทำงานไม่เหมือนกัน
 description: ส่งคำสั่งนี้ไปให้ Gemini ผ่าน gcode (โหมดเว็บ) แล้วเอาคำตอบกลับมาในแชทนี้
 argument-hint: <สิ่งที่อยากให้ Gemini ทำ> [--new]
 allowed-tools: Bash(gcode:*)
